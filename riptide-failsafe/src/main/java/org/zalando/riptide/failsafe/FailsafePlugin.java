@@ -10,12 +10,12 @@ import net.jodah.failsafe.event.ExecutionAttemptedEvent;
 import net.jodah.failsafe.function.CheckedConsumer;
 import org.apiguardian.api.API;
 import org.springframework.http.client.ClientHttpResponse;
+import org.zalando.riptide.Attribute;
 import org.zalando.riptide.Plugin;
 import org.zalando.riptide.RequestArguments;
 import org.zalando.riptide.RequestExecution;
 import org.zalando.riptide.idempotency.IdempotencyPredicate;
 
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
@@ -23,12 +23,12 @@ import java.util.stream.Stream;
 
 import static lombok.AccessLevel.PRIVATE;
 import static org.apiguardian.api.API.Status.MAINTAINED;
-import static org.zalando.riptide.CancelableCompletableFuture.forwardTo;
-import static org.zalando.riptide.CancelableCompletableFuture.preserveCancelability;
 
 @API(status = MAINTAINED)
 @AllArgsConstructor(access = PRIVATE)
 public final class FailsafePlugin implements Plugin {
+
+    public static final Attribute<Integer> ATTEMPTS = Attribute.generate();
 
     private final ImmutableList<? extends Policy<ClientHttpResponse>> policies;
     private final ScheduledExecutorService scheduler;
@@ -57,24 +57,19 @@ public final class FailsafePlugin implements Plugin {
                 return execution.execute(arguments);
             }
 
-            final CompletableFuture<ClientHttpResponse> original = Failsafe.with(select(arguments))
+            return Failsafe.with(policies)
                     .with(scheduler)
-                    .getStageAsync(() -> execution.execute(arguments));
-
-            final CompletableFuture<ClientHttpResponse> cancelable = preserveCancelability(original);
-            original.whenComplete(forwardTo(cancelable));
-            return cancelable;
+                    .getStageAsync(context -> execution
+                            .execute(withAttempts(arguments, context.getAttemptCount())));
         };
     }
-
 
     private Policy<ClientHttpResponse>[] select(final RequestArguments arguments) {
         final Stream<Policy<ClientHttpResponse>> stream = policies.stream()
                 .filter(skipRetriesIfNeeded(arguments))
                 .map(withRetryListener(arguments));
 
-        @SuppressWarnings("unchecked")
-        final Policy<ClientHttpResponse>[] policies = stream.toArray(Policy[]::new);
+        @SuppressWarnings("unchecked") final Policy<ClientHttpResponse>[] policies = stream.toArray(Policy[]::new);
 
         return policies;
     }
@@ -91,11 +86,19 @@ public final class FailsafePlugin implements Plugin {
             if (policy instanceof RetryPolicy) {
                 final RetryPolicy<ClientHttpResponse> retryPolicy = (RetryPolicy<ClientHttpResponse>) policy;
                 return retryPolicy.copy()
-                        .onRetry(new RetryListenerAdapter(listener, arguments));
+                        .onFailedAttempt(new RetryListenerAdapter(listener, arguments));
             } else {
                 return policy;
             }
         };
+    }
+
+    private RequestArguments withAttempts(final RequestArguments arguments, final int attempts) {
+        if (attempts == 0) {
+            return arguments;
+        }
+
+        return arguments.withAttribute(ATTEMPTS, attempts);
     }
 
     @VisibleForTesting

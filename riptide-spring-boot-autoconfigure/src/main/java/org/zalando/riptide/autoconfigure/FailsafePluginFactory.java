@@ -6,6 +6,8 @@ import net.jodah.failsafe.Policy;
 import net.jodah.failsafe.RetryPolicy;
 import org.springframework.http.client.ClientHttpResponse;
 import org.zalando.riptide.Plugin;
+import org.zalando.riptide.autoconfigure.RiptideProperties.Client;
+import org.zalando.riptide.autoconfigure.RiptideProperties.Retry;
 import org.zalando.riptide.autoconfigure.RiptideProperties.Retry.Backoff;
 import org.zalando.riptide.failsafe.CircuitBreakerListener;
 import org.zalando.riptide.failsafe.FailsafePlugin;
@@ -30,7 +32,7 @@ final class FailsafePluginFactory {
 
     }
 
-    public static Plugin createFailsafePlugin(
+    public static Plugin create(
             final ScheduledExecutorService scheduler,
             @Nullable final RetryPolicy<ClientHttpResponse> retryPolicy,
             @Nullable final CircuitBreaker<ClientHttpResponse> circuitBreaker,
@@ -50,8 +52,10 @@ final class FailsafePluginFactory {
                 .withListener(listener);
     }
 
-    public static RetryPolicy<ClientHttpResponse> createRetryPolicy(final RiptideProperties.Retry config) {
+    public static RetryPolicy<ClientHttpResponse> createRetryPolicy(final Client client) {
         final RetryPolicy<ClientHttpResponse> policy = new RetryPolicy<>();
+
+        final Retry config = client.getRetry();
 
         Optional.ofNullable(config.getFixedDelay())
                 .ifPresent(delay -> delay.applyTo(policy::withDelay));
@@ -84,14 +88,17 @@ final class FailsafePluginFactory {
         Optional.ofNullable(config.getJitter())
                 .ifPresent(jitter -> jitter.applyTo(policy::withJitter));
 
-        policy.handle(TransientFaultException.class);
+        if (client.getTransientFaultDetection().getEnabled()) {
+            policy.handle(TransientFaultException.class);
+        }
+
         policy.handle(RetryException.class);
         policy.withDelay(new RetryAfterDelayFunction(systemUTC()));
 
         return policy;
     }
 
-    public static CircuitBreaker<ClientHttpResponse> createCircuitBreaker(final RiptideProperties.Client client,
+    public static CircuitBreaker<ClientHttpResponse> createCircuitBreaker(final Client client,
             final CircuitBreakerListener listener) {
         final CircuitBreaker<ClientHttpResponse> breaker = new CircuitBreaker<>();
 

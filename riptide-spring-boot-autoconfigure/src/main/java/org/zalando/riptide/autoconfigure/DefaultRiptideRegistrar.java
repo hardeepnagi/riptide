@@ -5,6 +5,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
+import io.opentracing.contrib.concurrent.TracedExecutorService;
+import io.opentracing.contrib.concurrent.TracedScheduledExecutorService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.jodah.failsafe.CircuitBreaker;
@@ -45,11 +47,12 @@ import org.zalando.riptide.httpclient.GzipHttpRequestInterceptor;
 import org.zalando.riptide.httpclient.metrics.HttpConnectionPoolMetrics;
 import org.zalando.riptide.idempotency.IdempotencyPredicate;
 import org.zalando.riptide.metrics.MetricsPlugin;
+import org.zalando.riptide.opentracing.OpenTracingPlugin;
+import org.zalando.riptide.opentracing.span.SpanDecorator;
 import org.zalando.riptide.soap.SOAPFaultHttpMessageConverter;
 import org.zalando.riptide.soap.SOAPHttpMessageConverter;
 import org.zalando.riptide.stream.Streams;
 import org.zalando.riptide.timeout.TimeoutPlugin;
-import org.zalando.tracer.concurrent.TracingExecutors;
 
 import javax.annotation.Nullable;
 import javax.xml.soap.SOAPConstants;
@@ -101,7 +104,7 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
         });
     }
 
-    private BeanMetadataElement registerExecutor(final String id, final Client client) {
+    private String registerExecutor(final String id, final Client client) {
         final String name = "http-" + id;
 
         final String executorId = registry.registerIfAbsent(id, ExecutorService.class, () -> {
@@ -127,7 +130,14 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
                             .addConstructorArgValue(ImmutableList.of(clientId(id))));
         }
 
-        return trace(executorId);
+        if (client.getTracing().getEnabled()) {
+            return registry.registerIfAbsent(id, TracedExecutorService.class, () ->
+                    genericBeanDefinition(TracedExecutorService.class)
+                            .addConstructorArgReference(executorId)
+                            .addConstructorArgReference("tracer"));
+        }
+
+        return executorId;
     }
 
     private static final class HttpMessageConverters {
@@ -198,7 +208,7 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
 
             return genericBeanDefinition(HttpFactory.class)
                     .setFactoryMethod("create")
-                    .addConstructorArgValue(registerExecutor(id, client))
+                    .addConstructorArgReference(registerExecutor(id, client))
                     .addConstructorArgReference(factoryId)
                     .addConstructorArgValue(client.getBaseUrl())
                     .addConstructorArgValue(client.getUrlResolution())
@@ -232,7 +242,7 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
                     genericBeanDefinition(ConcurrentClientHttpRequestFactory.class)
                             .addConstructorArgReference(factoryId)
                             .addConstructorArgValue(genericBeanDefinition(ConcurrentTaskExecutor.class)
-                                    .addConstructorArgValue(registerExecutor(id, client))
+                                    .addConstructorArgReference(registerExecutor(id, client))
                                     .getBeanDefinition())));
             template.addConstructorArgReference(factoryId);
             configureTemplate(template, client.getBaseUrl(), converters, plugins);
@@ -266,9 +276,10 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
         final Stream<Optional<String>> plugins = Stream.of(
                 registerMetricsPlugin(id, client),
                 registerTransientFaultPlugin(id, client),
+                registerOpenTracingPlugin(id, client),
                 registerFailsafePlugin(id, client),
-                registerBackupPlugin(id, client),
                 registerAuthorizationPlugin(id, client),
+                registerBackupPlugin(id, client),
                 registerTimeoutPlugin(id, client),
                 registerOriginalStackTracePlugin(id, client),
                 registerCustomPlugin(id));
@@ -281,12 +292,13 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
 
     private Optional<String> registerMetricsPlugin(final String id, final Client client) {
         if (client.getMetrics().getEnabled()) {
-            log.debug("Client [{}]: Registering [{}]", id, MetricsPlugin.class.getSimpleName());
-            final String pluginId = registry.registerIfAbsent(id, MetricsPlugin.class, () ->
-                    genericBeanDefinition(MetricsPluginFactory.class)
-                            .setFactoryMethod("createMetricsPlugin")
-                            .addConstructorArgReference("meterRegistry")
-                            .addConstructorArgValue(ImmutableList.of(clientId(id))));
+            final String pluginId = registry.registerIfAbsent(id, MetricsPlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, MetricsPlugin.class.getSimpleName());
+                return genericBeanDefinition(MetricsPluginFactory.class)
+                        .setFactoryMethod("createMetricsPlugin")
+                        .addConstructorArgReference("meterRegistry")
+                        .addConstructorArgValue(ImmutableList.of(clientId(id)));
+            });
 
             return Optional.of(pluginId);
         }
@@ -295,25 +307,55 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
 
     private Optional<String> registerTransientFaultPlugin(final String id, final Client client) {
         if (client.getTransientFaultDetection().getEnabled()) {
-            log.debug("Client [{}]: Registering [{}]", id, TransientFaultPlugin.class.getSimpleName());
-            final String pluginId = registry.registerIfAbsent(id, TransientFaultPlugin.class, () ->
-                    genericBeanDefinition(TransientFaultPlugin.class)
-                            .addConstructorArgReference(findFaultClassifier(id)));
+            final String pluginId = registry.registerIfAbsent(id, TransientFaultPlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, TransientFaultPlugin.class.getSimpleName());
+                return genericBeanDefinition(TransientFaultPlugin.class)
+                        .addConstructorArgReference(findFaultClassifier(id));
+            });
             return Optional.of(pluginId);
+        }
+        return Optional.empty();
+    }
+
+    private Optional<String> registerOpenTracingPlugin(final String id, final Client client) {
+        if (client.getTracing().getEnabled()) {
+            registry.registerIfAbsent(id, OpenTracingPlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, OpenTracingPlugin.class.getSimpleName());
+
+                final String decorator = generateBeanName(id, SpanDecorator.class);
+                return genericBeanDefinition(OpenTracingPluginFactory.class)
+                        .setFactoryMethod("create")
+                        .addConstructorArgReference("tracer")
+                        .addConstructorArgValue(client)
+                        .addConstructorArgValue(registry.isRegistered(decorator) ? ref(decorator) : null);
+            });
         }
         return Optional.empty();
     }
 
     private Optional<String> registerFailsafePlugin(final String id, final Client client) {
         if (client.getRetry().getEnabled() || client.getCircuitBreaker().getEnabled()) {
-            log.debug("Client [{}]: Registering [{}]", id, FailsafePlugin.class.getSimpleName());
-            final String pluginId = registry.registerIfAbsent(id, FailsafePlugin.class, () ->
-                    genericBeanDefinition(FailsafePluginFactory.class)
-                            .setFactoryMethod("createFailsafePlugin")
-                            .addConstructorArgValue(registerScheduler(id, client))
-                            .addConstructorArgValue(registerRetryPolicy(id, client))
-                            .addConstructorArgValue(registerCircuitBreaker(id, client))
-                            .addConstructorArgReference(registerRetryListener(id, client)));
+            final String pluginId = registry.registerIfAbsent(id, FailsafePlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, FailsafePlugin.class.getSimpleName());
+                return genericBeanDefinition(FailsafePluginFactory.class)
+                        .setFactoryMethod("create")
+                        .addConstructorArgReference(registerScheduler(id, client))
+                        .addConstructorArgValue(registerRetryPolicy(id, client))
+                        .addConstructorArgValue(registerCircuitBreaker(id, client))
+                        .addConstructorArgReference(registerRetryListener(id, client));
+            });
+            return Optional.of(pluginId);
+        }
+        return Optional.empty();
+    }
+
+    private Optional<String> registerAuthorizationPlugin(final String id, final Client client) {
+        if (client.getOauth().getEnabled()) {
+            final String pluginId = registry.registerIfAbsent(id, AuthorizationPlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, AuthorizationPlugin.class.getSimpleName());
+                return genericBeanDefinition(AuthorizationPlugin.class)
+                        .addConstructorArgReference(registerAuthorizationProvider(id, client.getOauth()));
+            });
             return Optional.of(pluginId);
         }
         return Optional.empty();
@@ -324,22 +366,11 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
             log.debug("Client [{}]: Registering [{}]", id, BackupRequestPlugin.class.getSimpleName());
             final String pluginId = registry.registerIfAbsent(id, BackupRequestPlugin.class, () ->
                     genericBeanDefinition(BackupRequestPlugin.class)
-                            .addConstructorArgValue(registerScheduler(id, client))
+                            .addConstructorArgReference(registerScheduler(id, client))
                             .addConstructorArgValue(client.getBackupRequest().getDelay().getAmount())
                             .addConstructorArgValue(client.getBackupRequest().getDelay().getUnit())
                             .addConstructorArgValue(new IdempotencyPredicate())
-                            .addConstructorArgValue(registerExecutor(id, client)));
-            return Optional.of(pluginId);
-        }
-        return Optional.empty();
-    }
-
-    private Optional<String> registerAuthorizationPlugin(final String id, final Client client) {
-        if (client.getOauth().getEnabled()) {
-            log.debug("Client [{}]: Registering [{}]", id, AuthorizationPlugin.class.getSimpleName());
-            final String pluginId = registry.registerIfAbsent(id, AuthorizationPlugin.class, () ->
-                    genericBeanDefinition(AuthorizationPlugin.class)
-                            .addConstructorArgReference(registerAuthorizationProvider(id, client.getOauth())));
+                            .addConstructorArgReference(registerExecutor(id, client)));
             return Optional.of(pluginId);
         }
         return Optional.empty();
@@ -347,14 +378,15 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
 
     private Optional<String> registerTimeoutPlugin(final String id, final Client client) {
         if (client.getTimeouts().getEnabled()) {
-            log.debug("Client [{}]: Registering [{}]", id, TimeoutPlugin.class.getSimpleName());
-            final TimeSpan timeout = client.getTimeouts().getGlobal();
-            final String pluginId = registry.registerIfAbsent(id, TimeoutPlugin.class, () ->
-                    genericBeanDefinition(TimeoutPlugin.class)
-                            .addConstructorArgValue(registerScheduler(id, client))
-                            .addConstructorArgValue(timeout.getAmount())
-                            .addConstructorArgValue(timeout.getUnit())
-                            .addConstructorArgValue(registerExecutor(id, client)));
+            final String pluginId = registry.registerIfAbsent(id, TimeoutPlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, TimeoutPlugin.class.getSimpleName());
+                final TimeSpan timeout = client.getTimeouts().getGlobal();
+                return genericBeanDefinition(TimeoutPlugin.class)
+                        .addConstructorArgReference(registerScheduler(id, client))
+                        .addConstructorArgValue(timeout.getAmount())
+                        .addConstructorArgValue(timeout.getUnit())
+                        .addConstructorArgReference(registerExecutor(id, client));
+            });
             return Optional.of(pluginId);
         }
         return Optional.empty();
@@ -362,8 +394,10 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
 
     private Optional<String> registerOriginalStackTracePlugin(final String id, final Client client) {
         if (client.getStackTracePreservation().getEnabled()) {
-            log.debug("Client [{}]: Registering [{}]", id, OriginalStackTracePlugin.class.getSimpleName());
-            final String pluginId = registry.registerIfAbsent(id, OriginalStackTracePlugin.class);
+            final String pluginId = registry.registerIfAbsent(id, OriginalStackTracePlugin.class, () -> {
+                log.debug("Client [{}]: Registering [{}]", id, OriginalStackTracePlugin.class.getSimpleName());
+                return genericBeanDefinition(OriginalStackTracePlugin.class);
+            });
             return Optional.of(pluginId);
         }
         return Optional.empty();
@@ -387,7 +421,7 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
         }
     }
 
-    private BeanMetadataElement registerScheduler(final String id, final Client client) {
+    private String registerScheduler(final String id, final Client client) {
         // we allow users to use their own ScheduledExecutorService, but they don't have to configure tracing
         final String name = "http-" + id + "-scheduler";
 
@@ -412,7 +446,14 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
                             .addConstructorArgValue(ImmutableList.of(clientId(id))));
         }
 
-        return trace(executorId);
+        if (client.getTracing().getEnabled()) {
+            return registry.registerIfAbsent(id, TracedScheduledExecutorService.class, () ->
+                    genericBeanDefinition(TracedScheduledExecutorService.class)
+                            .addConstructorArgReference(executorId)
+                            .addConstructorArgReference("tracer"));
+        }
+
+        return executorId;
     }
 
     private BeanMetadataElement registerRetryPolicy(final String id, final Client client) {
@@ -420,7 +461,7 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
             return ref(registry.registerIfAbsent(id, RetryPolicy.class, () ->
                     genericBeanDefinition(FailsafePluginFactory.class)
                             .setFactoryMethod("createRetryPolicy")
-                            .addConstructorArgValue(client.getRetry())));
+                            .addConstructorArgValue(client)));
         }
         return null;
 
@@ -486,23 +527,6 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
                         .addConstructorArgValue(id));
     }
 
-    private BeanMetadataElement trace(final String executor) {
-        final Optional<BeanMetadataElement> result = ifPresent("org.zalando.tracer.concurrent.TracingExecutors",
-                () -> {
-                    if (registry.isRegistered("tracer")) {
-                        return genericBeanDefinition(TracingExecutors.class)
-                                .setFactoryMethod("preserve")
-                                .addConstructorArgReference(executor)
-                                .addConstructorArgReference("tracer")
-                                .getBeanDefinition();
-                    } else {
-                        return null;
-                    }
-                });
-
-        return result.orElseGet(() -> ref(executor));
-    }
-
     private String registerHttpClient(final String id, final Client client) {
         return registry.registerIfAbsent(id, HttpClient.class, () -> {
             log.debug("Client [{}]: Registering HttpClient", id);
@@ -538,9 +562,10 @@ final class DefaultRiptideRegistrar implements RiptideRegistrar {
     private List<BeanMetadataElement> configureFirstRequestInterceptors(final String id, final Client client) {
         final List<BeanMetadataElement> interceptors = list();
 
-        if (registry.isRegistered("tracerHttpRequestInterceptor")) {
-            log.debug("Client [{}]: Registering TracerHttpRequestInterceptor", id);
-            interceptors.add(ref("tracerHttpRequestInterceptor"));
+        // TODO theoretically tracing could still be disabled...
+        if (client.getTracing().getPropagateFlowId()) {
+            log.debug("Client [{}]: Registering FlowHttpRequestInterceptor", id);
+            interceptors.add(ref("flowHttpRequestInterceptor"));
         }
 
         return interceptors;

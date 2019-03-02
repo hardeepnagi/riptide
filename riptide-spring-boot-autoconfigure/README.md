@@ -23,19 +23,28 @@ together whenever interaction with a remote service is required. Spinning up new
 riptide.clients:
   example:
     base-url: http://example.com
-    connect-timeout: 150 milliseconds
-    socket-timeout: 100 milliseconds
-    connection-time-to-live: 30 seconds
-    max-connections-per-route: 16
+    connections:
+      connect-timeout: 150 milliseconds
+      socket-timeout: 100 milliseconds
+      time-to-live: 30 seconds
+      max-per-route: 16
     retry:
+      enabled: true
       fixed-delay: 50 milliseconds
       max-retries: 5
     circuit-breaker:
+      enabled: true
       failure-threshold: 3 out of 5
       delay: 30 seconds
       success-threshold: 5 out of 5
     caching:
+      enabled: true
+      shared: false
       max-cache-entries: 1000
+    tracing:
+      enabled: true
+      tags:
+        peer.service: example
 ```
 
 ```java
@@ -111,7 +120,7 @@ Required for `retry` and `circuit-breaker` support.
 
 #### [Transient Fault](../riptide-faults) detection
 
-Required when `detect-transient-faults` is enabled.
+Required when `transient-fault-detection` is enabled.
 
 ```xml
 <dependency>
@@ -196,7 +205,7 @@ OAuth2 tokens as files in a mounted directory. See
 
 #### [Metrics](../riptide-metrics) integration
 
-Required when `record-metrics` is enabled. 
+Required when `metrics` is enabled. 
 
 Will activate `micrometer` metrics support for:
 
@@ -239,6 +248,23 @@ Required when `caching` is configured:
 </dependency>
 ```
 
+#### Tracing
+
+Required when `tracing` is configured:
+
+```xml
+<dependency>
+    <groupId>org.zalando</groupId>
+    <artifactId>riptide-opentracing</artifactId>
+    <version>${riptide.version}</version>
+</dependency>
+<dependency>
+    <groupId>io.opentracing.contrib</groupId>
+    <artifactId>opentracing-concurrent</artifactId>
+    <version>${opentracing-concurrent.version}</version>
+</dependency>
+```
+
 ## Configuration
 
 You can now define new clients and override default configuration in your `application.yml`:
@@ -248,21 +274,30 @@ riptide:
   defaults:
     oauth:
       credentials-directory: /secrets
+    tracing:
+      enabled: true
+      tags:
+        account: ${CDP_TARGET_INFRASTRUCTURE_ACCOUNT}
+        zone: ${CDP_TARGET_REGION}
+        artifact_version: ${CDP_BUILD_VERSION}
+        deployment_id: ${CDP_DEPLOYMENT_ID}
   clients:
     example:
       base-url: http://example.com
       connections:
-          connect-timeout: 150 milliseconds
-          socket-timeout: 100 milliseconds
-          time-to-live: 30 seconds
-          max-per-route: 16
+        connect-timeout: 150 milliseconds
+        socket-timeout: 100 milliseconds
+        time-to-live: 30 seconds
+        max-per-route: 16
       threads:
         min-size: 4
         max-size: 16
         keep-alive: 1 minnute
         queue-size: 0
+      oauth:
+        enabled: true
       transient-fault-detection.enabled: true
-      stack-trace-preservation: true
+      stack-trace-preservation.enabled: true
       retry:
         enabled: true
         fixed-delay: 50 milliseconds
@@ -290,8 +325,10 @@ riptide:
           enabled: true
           coefficient: 0.1
           default-life-time: 10 minutes
-      oauth:
-        enabled: true
+      tracing:
+        tags:
+          peer.service: example
+        propagate-flow-id: true
 ```
 
 Clients are identified by a *Client ID*, for instance `example` in the sample above. You can have as many clients as you want.
@@ -300,141 +337,149 @@ Clients are identified by a *Client ID*, for instance `example` in the sample ab
 
 For a complete overview of available properties, they type and default value please refer to the following table:
 
-| Configuration                           | Data type      | Default / Comment                                |
-|-----------------------------------------|----------------|--------------------------------------------------|
-| `riptide`                               |                |                                                  |
-| `├── defaults`                          |                |                                                  |
-| `│   ├── url-resolution`                | `String`       | `rfc`, not applicable to Async/RestTemplate      |
-| `│   ├── connections`                   |                |                                                  |
-| `│   │   ├── connect-timeout`           | `TimeSpan`     | `5 seconds`                                      |
-| `│   │   ├── socket-timeout`            | `TimeSpan`     | `5 seconds`                                      |
-| `│   │   ├── time-to-live`              | `TimeSpan`     | `30 seconds`                                     |
-| `│   │   ├── max-per-route`             | `int`          | `20`                                             |
-| `│   │   └── max-total`                 | `int`          | `20` (or at least `max-per-route`)               |
-| `│   ├── threads`                       |                |                                                  |
-| `│   │   ├── min-size`                  | `int`          | `1`                                              |
-| `│   │   ├── max-size`                  | `int`          | same as `connections.max-total`                  |
-| `│   │   ├── keep-alive`                | `TimeSpan`     | `1 minute`                                       |
-| `│   │   └── queue-size`                | `int`          | `0`                                              |
-| `│   ├── oauth`                         |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   └── credentials-directory`     | `Path`         | `/meta/credentials`                              |
-| `│   ├── transient-fault-detection`     |                |                                                  |
-| `│   │   └── enabled`                   | `boolean`      | `false`                                          |
-| `│   ├── stack-trace-preservation`      |                |                                                  |
-| `│   │   └── enabled`                   | `boolean`      | `false`                                          |
-| `│   ├── metrics`                       |                |                                                  |
-| `│   │   └── enabled`                   | `boolean`      | `false`                                          |
-| `│   ├── retry`                         |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   ├── fixed-delay`               | `TimeSpan`     | none, mutually exclusive to `backoff`            |
-| `│   │   ├── backoff`                   |                | none, mutually exclusive to `fixed-delay`        |
-| `│   │   │   ├── enabled`               | `boolean`      | `false`                                          |
-| `│   │   │   ├── delay`                 | `TimeSpan`     | none, requires `backoff.max-delay`               |
-| `│   │   │   ├── max-delay`             | `TimeSpan`     | none, requires `backoff.delay`                   |
-| `│   │   │   └── delay-factor`          | `double`       | `2.0`                                            |
-| `│   │   ├── max-retries`               | `int`          | none                                             |
-| `│   │   ├── max-duration`              | `TimeSpan`     | none                                             |
-| `│   │   ├── jitter-factor`             | `double`       | none, mutually exclusive to `jitter`             |
-| `│   │   └── jitter`                    | `TimeSpan`     | none, mutually exclusive to `jitter-factor`      |
-| `│   ├── circuit-breaker`               |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   ├── failure-threshold`         | `Ratio`        | none                                             |
-| `│   │   ├── delay`                     | `TimeSpan`     | no delay                                         |
-| `│   │   └── success-threshold`         | `Ratio`        | `failure-threshold`                              |
-| `│   ├── backup-request`                |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   └── delay`                     | `TimeSpan`     | no delay                                         |
-| `│   ├── timeouts`                      |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   └── global`                    | `TimeSpan`     | none                                             |
-| `│   ├── request-compression`           |                |                                                  |
-| `│   │   └── enabled`                   | `boolean`      | `false`                                          |
-| `│   ├── certificate-pinning`           |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   └── keystore`                  |                |                                                  |
-| `│   │       ├── path`                  | `Path`         | none                                             |
-| `│   │       └── password`              | `String`       | none                                             |
-| `│   ├── caching`                       |                |                                                  |
-| `│   │   ├── enabled`                   | `boolean`      | `false`                                          |
-| `│   │   ├── shared`                    | `boolean`      | `false`                                          |
-| `│   │   ├── directory`                 | `String`       | none, *in-memory* caching by default             |
-| `│   │   ├── max-object-size`           | `int`          | `8192`                                           |
-| `│   │   ├── max-cache-entries`         | `int`          | `1000`                                           |
-| `│   │   └── heuristic`                 |                | If max age was not specified by the server       |
-| `│   │       ├── enabled`               | `boolean`      | `false`                                          |
-| `│   │       ├── coefficient`           | `double`       | `0.1`                                            |
-| `│   │       └── default-life-time`     | `TimeSpan`     | `0 seconds`, disabled                            |
-| `│   └── soap`                          |                |                                                  |
-| `│       ├── enabled`                   | `boolean`      | `false`                                          |
-| `│       └── protocol`                  | `String`       | `1.1` (possible other value: `1.2`)              |
-| `└── clients`                           |                |                                                  |
-| `    └── <id>`                          | `String`       |                                                  |
-| `        ├── base-url`                  | `URI`          | none                                             |
-| `        ├── url-resolution`            | `String`       | see `defaults`                                   |
-| `        ├── connections`               |                |                                                  |
-| `        │   ├── connect-timeout`       | `TimeSpan`     | see `defaults`                                   |
-| `        │   ├── socket-timeout`        | `TimeSpan`     | see `defaults`                                   |
-| `        │   ├── time-to-live`          | `TimeSpan`     | see `defaults`                                   |
-| `        │   ├── max-per-route`         | `int`          | see `defaults`                                   |
-| `        │   └── max-total`             | `int`          | see `defaults`                                   |
-| `        └── threads`                   |                |                                                  |
-| `            ├── min-size`              | `int`          | see `defaults`                                   |
-| `            ├── max-size`              | `int`          | see `defaults`                                   |
-| `            ├── keep-alive`            | `TimeSpan`     | see `defaults`                                   |
-| `            └── queue-size`            | `int`          | see `defaults`                                   |
-| `        ├── oauth`                     |                |                                                  |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   └── credentials-directory` | `Path`         | see `defaults`                                   |
-| `        ├── transient-fault-detection` |                |                                                  |
-| `        │   └── enabled`               | `boolean`      | see `defaults`                                   |
-| `        ├── stack-trace-preservation`  |                |                                                  |
-| `        │   └── enabled`               | `boolean`      | see `defaults`                                   |
-| `        ├── metrics`                   |                |                                                  |
-| `        │   └── enabled`               | `boolean`      | see `defaults`                                   |
-| `        ├── retry`                     |                |                                                  |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   ├── fixed-delay`           | `TimeSpan`     | see `defaults`                                   |
-| `        │   ├── backoff`               |                |                                                  |
-| `        │   │   ├── enabled`           | `boolean`      | see `defaults`                                   |
-| `        │   │   ├── delay`             | `TimeSpan`     | see `defaults`                                   |
-| `        │   │   ├── max-delay`         | `TimeSpan`     | see `defaults`                                   |
-| `        │   │   └── delay-factor`      | `double`       | see `defaults`                                   |
-| `        │   ├── max-retries`           | `int`          | see `defaults`                                   |
-| `        │   ├── max-duration`          | `TimeSpan`     | see `defaults`                                   |
-| `        │   ├── jitter-factor`         | `double`       | see `defaults`                                   |
-| `        │   └── jitter`                | `TimeSpan`     | see `defaults`                                   |
-| `        ├── circuit-breaker`           |                |                                                  |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   ├── failure-threshold`     | `Ratio`        | see `defaults`                                   |
-| `        │   ├── delay`                 | `TimeSpan`     | see `defaults`                                   |
-| `        │   └── success-threshold`     | `Ratio`        | see `defaults`                                   |
-| `        ├── backup-request`            |                |                                                  |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   └── delay`                 | `TimeSpan`     | see `defaults`                                   |
-| `        ├── timeouts`                  |                |                                                  |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   └── global`                | `TimeSpan`     | see `defaults`                                   |
-| `        ├── request-compression`       |                |                                                  |
-| `        │   └── enabled`               | `boolean`      | see `defaults`                                   |
-| `        ├── certificate-pinning`       |                |                                                  |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   └── keystore`              |                |                                                  |
-| `        │       ├── path`              | `Path`         | see `defaults`                                   |
-| `        │       └── password`          | `String`       | see `defaults`                                   |
-| `        ├── caching`                   |                | see `defaults`                                   |
-| `        │   ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `        │   ├── shared`                | `boolean`      | see `defaults`                                   |
-| `        │   ├── directory`             | `String`       | see `defaults`                                   |
-| `        │   ├── max-object-size`       | `int`          | see `defaults`                                   |
-| `        │   ├── max-cache-entries`     | `int`          | see `defaults`                                   |
-| `        │   └── heuristic`             |                |                                                  |
-| `        │       ├── enabled`           | `boolean`      | see `defaults`                                   |
-| `        │       ├── coefficient`       | `double`       | see `defaults`                                   |
-| `        │       └── default-life-time` | `TimeSpan`     | see `defaults`                                   |
-| `        └── soap`                      |                |                                                  |
-| `            ├── enabled`               | `boolean`      | see `defaults`                                   |
-| `            └── protocol`              | `String`       | see `defaults`                                   |
+| Configuration                           | Data type             | Default / Comment                                |
+|-----------------------------------------|-----------------------|--------------------------------------------------|
+| `riptide`                               |                       |                                                  |
+| `├── defaults`                          |                       |                                                  |
+| `│   ├── url-resolution`                | `String`              | `rfc`, not applicable to Async/RestTemplate      |
+| `│   ├── connections`                   |                       |                                                  |
+| `│   │   ├── connect-timeout`           | `TimeSpan`            | `5 seconds`                                      |
+| `│   │   ├── socket-timeout`            | `TimeSpan`            | `5 seconds`                                      |
+| `│   │   ├── time-to-live`              | `TimeSpan`            | `30 seconds`                                     |
+| `│   │   ├── max-per-route`             | `int`                 | `20`                                             |
+| `│   │   └── max-total`                 | `int`                 | `20` (or at least `max-per-route`)               |
+| `│   ├── threads`                       |                       |                                                  |
+| `│   │   ├── min-size`                  | `int`                 | `1`                                              |
+| `│   │   ├── max-size`                  | `int`                 | same as `connections.max-total`                  |
+| `│   │   ├── keep-alive`                | `TimeSpan`            | `1 minute`                                       |
+| `│   │   └── queue-size`                | `int`                 | `0`                                              |
+| `│   ├── oauth`                         |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   └── credentials-directory`     | `Path`                | `/meta/credentials`                              |
+| `│   ├── transient-fault-detection`     |                       |                                                  |
+| `│   │   └── enabled`                   | `boolean`             | `false`                                          |
+| `│   ├── stack-trace-preservation`      |                       |                                                  |
+| `│   │   └── enabled`                   | `boolean`             | `false`                                          |
+| `│   ├── metrics`                       |                       |                                                  |
+| `│   │   └── enabled`                   | `boolean`             | `false`                                          |
+| `│   ├── retry`                         |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   ├── fixed-delay`               | `TimeSpan`            | none, mutually exclusive to `backoff`            |
+| `│   │   ├── backoff`                   |                       | none, mutually exclusive to `fixed-delay`        |
+| `│   │   │   ├── enabled`               | `boolean`             | `false`                                          |
+| `│   │   │   ├── delay`                 | `TimeSpan`            | none, requires `backoff.max-delay`               |
+| `│   │   │   ├── max-delay`             | `TimeSpan`            | none, requires `backoff.delay`                   |
+| `│   │   │   └── delay-factor`          | `double`              | `2.0`                                            |
+| `│   │   ├── max-retries`               | `int`                 | none                                             |
+| `│   │   ├── max-duration`              | `TimeSpan`            | none                                             |
+| `│   │   ├── jitter-factor`             | `double`              | none, mutually exclusive to `jitter`             |
+| `│   │   └── jitter`                    | `TimeSpan`            | none, mutually exclusive to `jitter-factor`      |
+| `│   ├── circuit-breaker`               |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   ├── failure-threshold`         | `Ratio`               | none                                             |
+| `│   │   ├── delay`                     | `TimeSpan`            | no delay                                         |
+| `│   │   └── success-threshold`         | `Ratio`               | `failure-threshold`                              |
+| `│   ├── backup-request`                |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   └── delay`                     | `TimeSpan`            | no delay                                         |
+| `│   ├── timeouts`                      |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   └── global`                    | `TimeSpan`            | none                                             |
+| `│   ├── request-compression`           |                       |                                                  |
+| `│   │   └── enabled`                   | `boolean`             | `false`                                          |
+| `│   ├── certificate-pinning`           |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   └── keystore`                  |                       |                                                  |
+| `│   │       ├── path`                  | `Path`                | none                                             |
+| `│   │       └── password`              | `String`              | none                                             |
+| `│   ├── caching`                       |                       |                                                  |
+| `│   │   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   │   ├── shared`                    | `boolean`             | `true`                                           |
+| `│   │   ├── directory`                 | `String`              | none, *in-memory* caching by default             |
+| `│   │   ├── max-object-size`           | `int`                 | `8192`                                           |
+| `│   │   ├── max-cache-entries`         | `int`                 | `1000`                                           |
+| `│   │   └── heuristic`                 |                       | If max age was not specified by the server       |
+| `│   │       ├── enabled`               | `boolean`             | `false`                                          |
+| `│   │       ├── coefficient`           | `double`              | `0.1`                                            |
+| `│   |       └── default-life-time`     | `TimeSpan`            | `0 seconds`, disabled                            |
+| `│   ├── tracing`                       |                       |                                                  |
+| `│   |   ├── enabled`                   | `boolean`             | `false`                                          |
+| `│   |   ├── tags`                      | `Map<String, String>` | none                                             |
+| `│   |   └── propagate-flow-id`         | `boolean`             | `false`                                          |
+| `│   └── soap`                          |                       |                                                  |
+| `│       ├── enabled`                   | `boolean`             | `false`                                          |
+| `│       └── protocol`                  | `String`              | `1.1` (possible other value: `1.2`)              |
+| `└── clients`                           |                       |                                                  |
+| `    └── <id>`                          | `String`              |                                                  |
+| `        ├── base-url`                  | `URI`                 | none                                             |
+| `        ├── url-resolution`            | `String`              | see `defaults`                                   |
+| `        ├── connections`               |                       |                                                  |
+| `        │   ├── connect-timeout`       | `TimeSpan`            | see `defaults`                                   |
+| `        │   ├── socket-timeout`        | `TimeSpan`            | see `defaults`                                   |
+| `        │   ├── time-to-live`          | `TimeSpan`            | see `defaults`                                   |
+| `        │   ├── max-per-route`         | `int`                 | see `defaults`                                   |
+| `        │   └── max-total`             | `int`                 | see `defaults`                                   |
+| `        ├── threads`                   |                       |                                                  |
+| `        │   ├── min-size`              | `int`                 | see `defaults`                                   |
+| `        │   ├── max-size`              | `int`                 | see `defaults`                                   |
+| `        │   ├── keep-alive`            | `TimeSpan`            | see `defaults`                                   |
+| `        │   └── queue-size`            | `int`                 | see `defaults`                                   |
+| `        ├── oauth`                     |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   └── credentials-directory` | `Path`                | see `defaults`                                   |
+| `        ├── transient-fault-detection` |                       |                                                  |
+| `        │   └── enabled`               | `boolean`             | see `defaults`                                   |
+| `        ├── stack-trace-preservation`  |                       |                                                  |
+| `        │   └── enabled`               | `boolean`             | see `defaults`                                   |
+| `        ├── metrics`                   |                       |                                                  |
+| `        │   └── enabled`               | `boolean`             | see `defaults`                                   |
+| `        ├── retry`                     |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   ├── fixed-delay`           | `TimeSpan`            | see `defaults`                                   |
+| `        │   ├── backoff`               |                       |                                                  |
+| `        │   │   ├── enabled`           | `boolean`             | see `defaults`                                   |
+| `        │   │   ├── delay`             | `TimeSpan`            | see `defaults`                                   |
+| `        │   │   ├── max-delay`         | `TimeSpan`            | see `defaults`                                   |
+| `        │   │   └── delay-factor`      | `double`              | see `defaults`                                   |
+| `        │   ├── max-retries`           | `int`                 | see `defaults`                                   |
+| `        │   ├── max-duration`          | `TimeSpan`            | see `defaults`                                   |
+| `        │   ├── jitter-factor`         | `double`              | see `defaults`                                   |
+| `        │   └── jitter`                | `TimeSpan`            | see `defaults`                                   |
+| `        ├── circuit-breaker`           |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   ├── failure-threshold`     | `Ratio`               | see `defaults`                                   |
+| `        │   ├── delay`                 | `TimeSpan`            | see `defaults`                                   |
+| `        │   └── success-threshold`     | `Ratio`               | see `defaults`                                   |
+| `        ├── backup-request`            |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   └── delay`                 | `TimeSpan`            | see `defaults`                                   |
+| `        ├── timeouts`                  |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   └── global`                | `TimeSpan`            | see `defaults`                                   |
+| `        ├── request-compression`       |                       |                                                  |
+| `        │   └── enabled`               | `boolean`             | see `defaults`                                   |
+| `        ├── certificate-pinning`       |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   └── keystore`              |                       |                                                  |
+| `        │       ├── path`              | `Path`                | see `defaults`                                   |
+| `        │       └── password`          | `String`              | see `defaults`                                   |
+| `        ├── caching`                   |                       | see `defaults`                                   |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   ├── shared`                | `boolean`             | see `defaults`                                   |
+| `        │   ├── directory`             | `String`              | see `defaults`                                   |
+| `        │   ├── max-object-size`       | `int`                 | see `defaults`                                   |
+| `        │   ├── max-cache-entries`     | `int`                 | see `defaults`                                   |
+| `        │   └── heuristic`             |                       |                                                  |
+| `        │       ├── enabled`           | `boolean`             | see `defaults`                                   |
+| `        │       ├── coefficient`       | `double`              | see `defaults`                                   |
+| `        │       └── default-life-time` | `TimeSpan`            | see `defaults`                                   |
+| `        ├── tracing`                   |                       |                                                  |
+| `        │   ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `        │   ├── tags`                  | `Map<String, String>` | see `defaults`                                   |
+| `        │   └── propagate-flow-id`     | `boolean`             | see `defaults`                                   |
+| `        └── soap`                      |                       |                                                  |
+| `            ├── enabled`               | `boolean`             | see `defaults`                                   |
+| `            └── protocol`              | `String`              | see `defaults`                                   |
 
 **Beware** that starting with Spring Boot 1.5.x the property resolution for environment variables changes and
 properties like `REST_CLIENTS_EXAMPLE_BASEURL` no longer work. As an alternative applications can use the 
@@ -467,10 +512,10 @@ Besides `Http`, you can also alternatively inject any of the following types per
 - `ClientHttpMessageConverters`
 - `AsyncListenableTaskExecutor`
 
-### Trusted Keystore
+### Certificate Pinning
 
 A client can be configured to only connect to trusted hosts (see
-[Certificate Pinning](https://www.owasp.org/index.php/Certificate_and_Public_Key_Pinning)) by configuring the `keystore` key. Use
+[Certificate Pinning](https://www.owasp.org/index.php/Certificate_and_Public_Key_Pinning)) by configuring the `certificate-pinning` key. Use
 `keystore.path` to refer to a *JKS*  keystore on the classpath/filesystem and (optionally) specify the passphrase via `keystore.password`.
 
 You can generate a keystore using the [JDK's keytool](http://docs.oracle.com/javase/7/docs/technotes/tools/#security):
@@ -577,9 +622,9 @@ final class RiptideTest {
     private MockRestServiceServer server;
 
     @Test
-    public void shouldAutowireMockedHttp() throws Exception {
+    public void shouldAutowireMockedHttp()  {
         server.expect(requestTo("https://example.com/bar")).andRespond(withSuccess());
-        client.remoteCall()
+        client.remoteCall()           ;
         server.verify();
     }
 }

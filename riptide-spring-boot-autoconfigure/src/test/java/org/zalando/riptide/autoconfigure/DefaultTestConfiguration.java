@@ -13,6 +13,7 @@ import org.zalando.tracer.spring.TracerAutoConfiguration;
         JacksonAutoConfiguration.class,
         LogbookAutoConfiguration.class,
         TracerAutoConfiguration.class,
+        OpenTracingTestAutoConfiguration.class,
         MetricsTestAutoConfiguration.class,
 })
 @ActiveProfiles("default")

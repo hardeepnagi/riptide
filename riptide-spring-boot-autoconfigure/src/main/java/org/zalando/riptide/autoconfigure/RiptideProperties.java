@@ -18,6 +18,7 @@ import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static java.util.Collections.emptyMap;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apiguardian.api.API.Status.INTERNAL;
@@ -98,6 +99,9 @@ public final class RiptideProperties {
         );
 
         @NestedConfigurationProperty
+        private Tracing tracing = new Tracing(false, emptyMap(), false);
+
+        @NestedConfigurationProperty
         private Soap soap = new Soap(false, "1.1");
 
     }
@@ -149,6 +153,9 @@ public final class RiptideProperties {
 
         @NestedConfigurationProperty
         private Caching caching;
+
+        @NestedConfigurationProperty
+        private Tracing tracing;
 
         @NestedConfigurationProperty
         private Soap soap;
@@ -317,6 +324,17 @@ public final class RiptideProperties {
             private TimeSpan defaultLifeTime;
         }
     }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static final class Tracing {
+        private Boolean enabled;
+        private Map<String, String> tags;
+        private Boolean propagateFlowId;
+    }
+
 
     @Getter
     @Setter
